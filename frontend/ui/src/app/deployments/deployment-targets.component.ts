@@ -149,7 +149,7 @@ export class DeploymentTargetsComponent implements AfterViewInit {
     map(([deploymentTargets, deploymentTargetMetrics]) =>
       deploymentTargets.map((dt) => ({
         ...dt,
-        metrics: deploymentTargetMetrics.find((x) => x.id === dt.id),
+        metrics: deploymentTargetMetrics.find((x) => x.deploymentTargetId === dt.id),
       }))
     ),
     map((deploymentTargets) =>
