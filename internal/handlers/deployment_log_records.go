@@ -42,8 +42,8 @@ func exportDeploymentLogsHandler() http.HandlerFunc {
 
 		deployment := internalctx.GetDeployment(ctx)
 
-		resource := r.FormValue("resource")
-		if resource == "" {
+		resources := r.URL.Query()["resource"]
+		if len(resources) == 0 {
 			http.Error(w, "query parameter resource is required", http.StatusBadRequest)
 			return
 		}
@@ -52,7 +52,7 @@ func exportDeploymentLogsHandler() http.HandlerFunc {
 		org := authInfo.CurrentOrg()
 		limit := int(subscription.GetLogExportRowsLimit(org.SubscriptionType))
 
-		filename := fmt.Sprintf("%s_%s.log", time.Now().Format("2006-01-02"), resource)
+		filename := fmt.Sprintf("%s_%s.log", time.Now().Format("2006-01-02"), strings.Join(resources, "_"))
 
 		SetFileDownloadHeaders(w, filename)
 
@@ -72,7 +72,7 @@ func exportDeploymentLogsHandler() http.HandlerFunc {
 		replacer := secretReplacer(secrets)
 
 		err := db.GetDeploymentLogRecordsForExport(
-			ctx, deployment.ID, resource, limit,
+			ctx, deployment.ID, resources, limit,
 			func(record types.DeploymentLogRecord) error {
 				_, err := fmt.Fprintf(w, "[%s] [%s] %s\n",
 					record.Timestamp.Format(time.RFC3339),
@@ -94,8 +94,8 @@ func getDeploymentLogsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		deployment := internalctx.GetDeployment(ctx)
-		resource := r.FormValue("resource")
-		if resource == "" {
+		resources := r.URL.Query()["resource"]
+		if len(resources) == 0 {
 			http.Error(w, "query parameter resource is required", http.StatusBadRequest)
 			return
 		}
@@ -123,6 +123,7 @@ func getDeploymentLogsHandler() http.HandlerFunc {
 				return
 			}
 		}
+		order := types.OrderDirection(r.FormValue("order"))
 
 		var secrets []types.SecretWithUpdatedBy
 		if dt, err := db.GetDeploymentTargetForDeploymentID(ctx, deployment.ID); err != nil {
@@ -138,7 +139,7 @@ func getDeploymentLogsHandler() http.HandlerFunc {
 		}
 
 		if records, err := db.GetDeploymentLogRecords(
-			ctx, deployment.ID, resource, limit, before, after, filter,
+			ctx, deployment.ID, resources, limit, before, after, filter, order,
 		); err != nil {
 			if errors.Is(err, apierrors.ErrBadRequest) {
 				http.Error(w, err.Error(), http.StatusBadRequest)

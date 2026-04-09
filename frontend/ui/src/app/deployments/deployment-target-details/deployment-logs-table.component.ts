@@ -8,8 +8,22 @@ import {
 } from '../../components/timeseries-table/timeseries-table.component';
 import {DeploymentLogsService} from '../../services/deployment-logs.service';
 import {DeploymentLogRecord} from '../../types/deployment-log-record';
+import {OrderDirection} from '../../types/timeseries-options';
 
 const ansiEscapePattern = /\u001b[^m]*m/g;
+
+const RESOURCE_COLORS = [
+  'text-blue-600 dark:text-blue-400',
+  'text-emerald-600 dark:text-emerald-400',
+  'text-amber-600 dark:text-amber-400',
+  'text-violet-600 dark:text-violet-400',
+  'text-cyan-600 dark:text-cyan-400',
+  'text-rose-600 dark:text-rose-400',
+  'text-lime-700 dark:text-lime-400',
+  'text-pink-600 dark:text-pink-400',
+  'text-teal-600 dark:text-teal-400',
+  'text-orange-600 dark:text-orange-400',
+];
 
 function logRecordToTimeseriesEntry(record: DeploymentLogRecord): TimeseriesEntry {
   return {
@@ -17,16 +31,18 @@ function logRecordToTimeseriesEntry(record: DeploymentLogRecord): TimeseriesEntr
     date: record.timestamp,
     status: record.severity,
     detail: record.body.trim().replace(ansiEscapePattern, ''),
+    resource: record.resource,
   };
 }
 
 class LogsTimeseriesSource implements TimeseriesSource {
-  public readonly batchSize = 25;
+  public readonly batchSize = 50;
 
   constructor(
     private readonly svc: DeploymentLogsService,
     private readonly deploymentId: string,
-    private readonly resource: string,
+    private readonly resources: string[],
+    private readonly order: OrderDirection,
     private readonly after?: Date,
     private readonly before?: Date,
     private readonly filter?: string
@@ -34,24 +50,25 @@ class LogsTimeseriesSource implements TimeseriesSource {
 
   load(): Observable<TimeseriesEntry[]> {
     return this.svc
-      .get(this.deploymentId, this.resource, {
+      .get(this.deploymentId, this.resources, {
         limit: this.batchSize,
         after: this.after,
         before: this.before,
         filter: this.filter,
+        order: this.order,
       })
       .pipe(map((logs) => logs.map(logRecordToTimeseriesEntry)));
   }
 
   loadAfter(after: Date): Observable<TimeseriesEntry[]> {
     return this.svc
-      .get(this.deploymentId, this.resource, {limit: this.batchSize, after, filter: this.filter})
+      .get(this.deploymentId, this.resources, {limit: this.batchSize, after, filter: this.filter, order: this.order})
       .pipe(map((logs) => logs.map(logRecordToTimeseriesEntry)));
   }
 
   loadBefore(before: Date): Observable<TimeseriesEntry[]> {
     return this.svc
-      .get(this.deploymentId, this.resource, {limit: this.batchSize, before, filter: this.filter})
+      .get(this.deploymentId, this.resources, {limit: this.batchSize, before, filter: this.filter, order: this.order})
       .pipe(map((logs) => logs.map(logRecordToTimeseriesEntry)));
   }
 }
@@ -62,27 +79,38 @@ class LogsTimeseriesSource implements TimeseriesSource {
     [source]="source()"
     [exporter]="exporter"
     [live]="live()"
-    [newestFirst]="newestFirst()" />`,
+    [orderDirection]="orderDirection()"
+    [resourceColorMap]="resourceColorMap()" />`,
   imports: [TimeseriesTableComponent],
 })
 export class DeploymentLogsTableComponent {
   private readonly svc = inject(DeploymentLogsService);
 
   public readonly deploymentId = input.required<string>();
-  public readonly resource = input.required<string>();
+  public readonly resources = input.required<string[]>();
   public readonly after = input<Date>();
   public readonly before = input<Date>();
   public readonly filter = input<string>();
-  public readonly newestFirst = input(true);
+  public readonly orderDirection = input<OrderDirection>('DESC');
 
   protected readonly live = computed(() => !this.after() && !this.before());
+
+  protected readonly resourceColorMap = computed(() => {
+    const resources = this.resources();
+    const map: Record<string, string> = {};
+    for (let i = 0; i < resources.length; i++) {
+      map[resources[i]] = RESOURCE_COLORS[i % RESOURCE_COLORS.length];
+    }
+    return map;
+  });
 
   protected readonly source = computed(
     () =>
       new LogsTimeseriesSource(
         this.svc,
         this.deploymentId(),
-        this.resource(),
+        this.resources(),
+        this.orderDirection(),
         this.after(),
         this.before(),
         this.filter()
@@ -90,8 +118,8 @@ export class DeploymentLogsTableComponent {
   );
 
   protected readonly exporter: TimeseriesExporter = {
-    export: () => this.svc.export(this.deploymentId(), this.resource()),
-    getFileName: () => `${this.resource()}.log`,
+    export: () => this.svc.export(this.deploymentId(), this.resources()),
+    getFileName: () => `${this.resources().join('_')}.log`,
   };
 
   private readonly table = viewChild.required(TimeseriesTableComponent);

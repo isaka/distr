@@ -1,5 +1,5 @@
 import {OverlayModule} from '@angular/cdk/overlay';
-import {Component, computed, ElementRef, inject, signal, viewChild} from '@angular/core';
+import {Component, computed, effect, ElementRef, inject, signal, viewChild} from '@angular/core';
 import {takeUntilDestroyed, toSignal} from '@angular/core/rxjs-interop';
 import {FormBuilder, ReactiveFormsModule} from '@angular/forms';
 import {ActivatedRoute, Router, RouterLink} from '@angular/router';
@@ -18,10 +18,13 @@ import dayjs from 'dayjs';
 import {combineLatest, debounceTime, map, of, switchMap} from 'rxjs';
 import {DeploymentLogsService} from '../../services/deployment-logs.service';
 import {DeploymentTargetsService} from '../../services/deployment-targets.service';
+import {OrderDirection} from '../../types/timeseries-options';
 import {DeploymentAppNameComponent} from '../deployment-target-card/deployment-app-name.component';
 import {DeploymentLogsTableComponent} from './deployment-logs-table.component';
 import {DeploymentStatusTableComponent} from './deployment-status-table.component';
 import {DeploymentTargetLogsTableComponent} from './deployment-target-logs-table.component';
+
+const ORDER_DIRECTION_KEY = 'logViewer.orderDirection';
 
 @Component({
   selector: 'app-deployment-target-detail',
@@ -51,8 +54,10 @@ export class DeploymentTargetDetailComponent {
   protected readonly faPlay = faPlay;
   protected readonly faArrowDownWideShort = faArrowDownWideShort;
   protected readonly faArrowUpShortWide = faArrowUpShortWide;
-
-  protected readonly newestFirst = signal(true);
+  protected readonly orderDirection = signal<OrderDirection>(
+    (localStorage.getItem(ORDER_DIRECTION_KEY) as OrderDirection) || 'DESC'
+  );
+  protected readonly newestFirst = computed(() => this.orderDirection() === 'DESC');
 
   protected readonly targetDropdown = signal(false);
   protected targetDropdownWidth = 0;
@@ -71,8 +76,8 @@ export class DeploymentTargetDetailComponent {
   protected readonly deploymentTargetId = toSignal(this.deploymentTargetId$);
   private readonly deploymentId$ = this.route.queryParamMap.pipe(map((p) => p.get('deploymentId')));
   protected readonly deploymentId = toSignal(this.deploymentId$);
-  private readonly resource$ = this.route.queryParamMap.pipe(map((p) => p.get('resource')));
-  protected readonly resource = toSignal(this.resource$);
+  private readonly selectedResources$ = this.route.queryParamMap.pipe(map((p) => p.getAll('resource')));
+  protected readonly selectedResources = toSignal(this.selectedResources$, {initialValue: [] as string[]});
   private readonly after$ = this.route.queryParamMap.pipe(
     map((p) => (p.has('from') ? new Date(p.get('from')!) : undefined))
   );
@@ -99,7 +104,7 @@ export class DeploymentTargetDetailComponent {
     return id ? this.selectedDeploymentTarget()?.deployments?.find((d) => d.id === id) : undefined;
   });
 
-  protected readonly resources = toSignal(
+  protected readonly availableResources = toSignal(
     this.route.queryParamMap.pipe(
       map((p) => p.get('deploymentId')),
       switchMap((id) => (id ? this.deploymentLogsService.getResources(id) : of(null)))
@@ -113,6 +118,8 @@ export class DeploymentTargetDetailComponent {
   private readonly deploymentLogsTable = viewChild(DeploymentLogsTableComponent);
 
   constructor() {
+    effect(() => localStorage.setItem(ORDER_DIRECTION_KEY, this.orderDirection()));
+
     this.route.queryParamMap.pipe(takeUntilDestroyed()).subscribe((params) => {
       this.form.patchValue(
         {
@@ -164,6 +171,7 @@ export class DeploymentTargetDetailComponent {
   protected selectDeployment(deployment: DeploymentWithLatestRevision | undefined) {
     this.form.patchValue({filter: ''});
     this.deploymentDropdown.set(false);
+    this.resourceDropdown.set(false);
     this.router.navigate([], {
       relativeTo: this.route,
       queryParams: {deploymentId: deployment?.id ?? null, resource: null},
@@ -171,12 +179,21 @@ export class DeploymentTargetDetailComponent {
     });
   }
 
-  protected selectResource(resource: string | undefined) {
-    this.form.patchValue({filter: ''});
+  protected toggleResource(resource: string) {
+    const current = this.selectedResources();
+    const updated = current.includes(resource) ? current.filter((r) => r !== resource) : [...current, resource];
+    this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: {resource: updated.length > 0 ? updated : null},
+      queryParamsHandling: 'merge',
+    });
+  }
+
+  protected clearResources() {
     this.resourceDropdown.set(false);
     this.router.navigate([], {
       relativeTo: this.route,
-      queryParams: {resource: resource ?? null},
+      queryParams: {resource: null},
       queryParamsHandling: 'merge',
     });
   }

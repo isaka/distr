@@ -164,11 +164,12 @@ func GetDeploymentLogRecordResources(ctx context.Context,
 func GetDeploymentLogRecords(
 	ctx context.Context,
 	deploymentID uuid.UUID,
-	resource string,
+	resources []string,
 	limit int,
 	before time.Time,
 	after time.Time,
 	filter string,
+	order types.OrderDirection,
 ) ([]types.DeploymentLogRecord, error) {
 	if before.IsZero() {
 		before = time.Now()
@@ -183,14 +184,14 @@ func GetDeploymentLogRecords(
 		`SELECT `+deploymentLogRecordOutputExpr+`
 		FROM DeploymentLogRecord lr
 		WHERE lr.deployment_id = @deploymentId
-			AND lr.resource = @resource
+			AND lr.resource = ANY(@resources)
 			AND lr.timestamp BETWEEN @after AND @before
 			`+filterExpr+`
-		ORDER BY lr.timestamp DESC
+		ORDER BY lr.timestamp `+string(types.EffectiveOrderDirection(order, !after.IsZero()))+`
 		LIMIT @limit`,
 		pgx.NamedArgs{
 			"deploymentId": deploymentID,
-			"resource":     resource,
+			"resources":    resources,
 			"limit":        limit,
 			"before":       before,
 			"after":        after,
@@ -216,7 +217,7 @@ func GetDeploymentLogRecords(
 func GetDeploymentLogRecordsForExport(
 	ctx context.Context,
 	deploymentID uuid.UUID,
-	resource string,
+	resources []string,
 	limit int,
 	callback func(types.DeploymentLogRecord) error,
 ) error {
@@ -226,12 +227,12 @@ func GetDeploymentLogRecordsForExport(
 		`SELECT `+deploymentLogRecordOutputExpr+`
 		FROM DeploymentLogRecord lr
 		WHERE lr.deployment_id = @deploymentId
-			AND lr.resource = @resource
+			AND lr.resource = ANY(@resources)
 		ORDER BY lr.timestamp DESC
 		LIMIT @limit`,
 		pgx.NamedArgs{
 			"deploymentId": deploymentID,
-			"resource":     resource,
+			"resources":    resources,
 			"limit":        limit,
 		},
 	)

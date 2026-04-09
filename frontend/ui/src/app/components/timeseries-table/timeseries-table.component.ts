@@ -1,13 +1,23 @@
-import {AsyncPipe, DatePipe} from '@angular/common';
-import {Component, computed, inject, input, signal} from '@angular/core';
-import {toObservable} from '@angular/core/rxjs-interop';
+import {AsyncPipe, DatePipe, NgClass, NgTemplateOutlet} from '@angular/common';
+import {
+  afterNextRender,
+  Component,
+  computed,
+  ElementRef,
+  inject,
+  Injector,
+  input,
+  signal,
+  viewChild,
+} from '@angular/core';
+import {toObservable, toSignal} from '@angular/core/rxjs-interop';
 import {FaIconComponent} from '@fortawesome/angular-fontawesome';
 import {faThumbtack, faThumbtackSlash} from '@fortawesome/free-solid-svg-icons';
 import {
   catchError,
   combineLatest,
   EMPTY,
-  filter,
+  exhaustMap,
   interval,
   map,
   merge,
@@ -20,7 +30,9 @@ import {
 import {distinctBy} from '../../../util/arrays';
 import {downloadBlob} from '../../../util/blob';
 import {getFormDisplayedError} from '../../../util/errors';
+import {IntersectionObserverDirective} from '../../directives/intersection-observer.directive';
 import {ToastService} from '../../services/toast.service';
+import {OrderDirection} from '../../types/timeseries-options';
 import {SpinnerComponent} from '../spinner/spinner.component';
 
 export interface TimeseriesEntry {
@@ -28,6 +40,7 @@ export interface TimeseriesEntry {
   date: string;
   status: string;
   detail: string;
+  resource?: string;
 }
 
 export interface TimeseriesSource {
@@ -82,46 +95,93 @@ export interface TimeseriesExporter {
 @Component({
   selector: 'app-timeseries-table',
   templateUrl: './timeseries-table.component.html',
-  imports: [DatePipe, AsyncPipe, FaIconComponent, SpinnerComponent],
+  imports: [
+    DatePipe,
+    AsyncPipe,
+    NgClass,
+    NgTemplateOutlet,
+    FaIconComponent,
+    IntersectionObserverDirective,
+    SpinnerComponent,
+  ],
 })
 export class TimeseriesTableComponent {
   public readonly source = input.required<TimeseriesSource>();
   public readonly exporter = input<TimeseriesExporter>();
   public readonly live = input<boolean>(true);
-  public readonly newestFirst = input<boolean>(true);
+  public readonly orderDirection = input<OrderDirection>('DESC');
+  public readonly resourceColorMap = input<Record<string, string>>({});
+  protected readonly newestFirst = computed(() => this.orderDirection() === 'DESC');
+  protected readonly showResourceColumn = computed(() => Object.keys(this.resourceColorMap()).length > 1);
 
   private readonly toastService = inject(ToastService);
+  private readonly injector = inject(Injector);
 
   protected readonly faThumbtack = faThumbtack;
   protected readonly faThumbtackSlash = faThumbtackSlash;
 
-  protected hasOlder = true;
+  private static readonly LIVE_INTERVAL_MS = 10_000;
+
+  protected hasMore = true;
   protected isExporting = false;
   protected readonly pinnedEntryId = signal<string | null>(null);
+  private readonly liveResetTimestamp = signal(Date.now());
+
+  protected readonly liveProgress = toSignal(
+    combineLatest([toObservable(this.live), toObservable(this.liveResetTimestamp)]).pipe(
+      switchMap(([live, resetTimestamp]) =>
+        live
+          ? interval(100).pipe(
+              map(() =>
+                Math.min(100, ((Date.now() - resetTimestamp) / TimeseriesTableComponent.LIVE_INTERVAL_MS) * 100)
+              )
+            )
+          : EMPTY
+      )
+    ),
+    {initialValue: 0}
+  );
 
   protected readonly sourceWithStatus = computed(() => new TimeseriesSourceWithStatus(this.source()));
 
   private readonly accumulatedEntries$: Observable<TimeseriesEntry[]> = combineLatest([
     toObservable(this.sourceWithStatus),
     toObservable(this.live),
+    toObservable(this.newestFirst),
   ]).pipe(
-    switchMap(([source, live]) => {
+    switchMap(([source, live, newestFirst]) => {
       let nextBefore: Date | null = null;
       let nextAfter: Date | null = null;
       return merge(
         merge(
           source.load().pipe(catchError((err) => this.handleError(err))),
-          this.showOlder$.pipe(
-            map(() => nextBefore),
-            filter((before) => before !== null),
-            switchMap((before) => source.loadBefore(before).pipe(catchError((err) => this.handleError(err))))
+          this.loadMore$.pipe(
+            exhaustMap(() => {
+              if (!newestFirst && !live) {
+                return nextAfter !== null
+                  ? source.loadAfter(nextAfter).pipe(catchError((err) => this.handleError(err)))
+                  : EMPTY;
+              } else {
+                return nextBefore !== null
+                  ? source.loadBefore(nextBefore).pipe(catchError((err) => this.handleError(err)))
+                  : EMPTY;
+              }
+            })
           )
-        ).pipe(tap((entries) => (this.hasOlder = entries.length >= source.batchSize))),
+        ).pipe(tap((entries) => (this.hasMore = entries.length >= source.batchSize))),
         live
-          ? interval(10_000).pipe(
-              map(() => nextAfter),
-              filter((after) => after !== null),
-              switchMap((after) => source.loadAfter(after).pipe(catchError((err) => this.handleError(err))))
+          ? interval(TimeseriesTableComponent.LIVE_INTERVAL_MS).pipe(
+              switchMap(() =>
+                nextAfter !== null
+                  ? source.loadAfter(nextAfter).pipe(catchError((err) => this.handleError(err)))
+                  : EMPTY
+              ),
+              tap((entries) => {
+                this.liveResetTimestamp.set(Date.now());
+                if (!newestFirst && entries.length > 0) {
+                  afterNextRender(() => this.scrollToBottom(), {injector: this.injector});
+                }
+              })
             )
           : EMPTY
       ).pipe(
@@ -150,10 +210,21 @@ export class TimeseriesTableComponent {
     toObservable(this.newestFirst),
   ]).pipe(map(([entries, newestFirst]) => entries.sort(compareByDate(newestFirst))));
 
-  private readonly showOlder$ = new Subject<void>();
+  private readonly loadMore$ = new Subject<void>();
+  private readonly tableBottom = viewChild<ElementRef<HTMLElement>>('tableBottom');
 
-  protected showOlder() {
-    this.showOlder$.next();
+  protected loadMore() {
+    this.loadMore$.next();
+  }
+
+  protected onLoadMoreVisible(isIntersecting: boolean) {
+    if (isIntersecting) {
+      this.loadMore();
+    }
+  }
+
+  private scrollToBottom() {
+    this.tableBottom()?.nativeElement.scrollIntoView({behavior: 'smooth'});
   }
 
   private handleError(err: unknown) {
