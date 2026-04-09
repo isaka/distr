@@ -33,7 +33,7 @@ func CheckDockerComposeStatus(
 	}
 
 	if len(summaries) == 0 {
-		return types.DeploymentStatusTypeRunning, "deployment has no containers", nil
+		return types.DeploymentStatusTypeError, "deployment has no containers", nil
 	}
 
 	var healthyCount, runningCount, startingCount int
@@ -97,6 +97,9 @@ func CheckDockerSwarmStatus(
 	)
 	if err != nil {
 		return types.DeploymentStatusTypeError, "", err
+	}
+	if len(services.Items) == 0 {
+		return types.DeploymentStatusTypeError, "deployment has no services", nil
 	}
 	for _, service := range services.Items {
 		if service.Spec.Mode.GlobalJob == nil && service.Spec.Mode.ReplicatedJob == nil {
