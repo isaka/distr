@@ -15,6 +15,8 @@ import (
 	"github.com/distr-sh/distr/internal/agentenv"
 	"github.com/distr-sh/distr/internal/types"
 	dockerconfig "github.com/docker/cli/cli/config"
+	composeapi "github.com/docker/compose/v5/pkg/api"
+	"github.com/docker/compose/v5/pkg/compose"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -22,6 +24,7 @@ import (
 func DockerEngineApply(
 	ctx context.Context,
 	deployment api.AgentDeployment,
+	updateStatus func(string),
 ) (agentDeployment *AgentDeployment, status string, err error) {
 	agentDeployment, err = NewAgentDeployment(deployment)
 	if err != nil {
@@ -34,9 +37,12 @@ func DockerEngineApply(
 	}
 
 	if *deployment.DockerType == types.DockerTypeSwarm {
-		status, err = ApplyComposeFileSwarm(ctx, deployment)
+		status, err = ApplyComposeFileSwarm(ctx, deployment, updateStatus)
 	} else {
-		status, err = ApplyComposeFile(ctx, deployment)
+		err = ApplyComposeFile(ctx, deployment, updateStatus)
+		if err == nil {
+			status = "compose command executed successfully"
+		}
 	}
 
 	if err == nil {
@@ -52,51 +58,59 @@ func DockerEngineApply(
 	return agentDeployment, status, err
 }
 
-func ApplyComposeFile(ctx context.Context, deployment api.AgentDeployment) (string, error) {
-	var envFile *os.File
-	var err error
+func ApplyComposeFile(ctx context.Context, deployment api.AgentDeployment, updateStatus func(string)) error {
+	updateStatus("initializing compose service")
 
+	var composeFileName string
+	if f, err := WriteTempFile("distr-compose-*.yaml", deployment.ComposeFile); err != nil {
+		return fmt.Errorf("failed to write compose file: %w", err)
+	} else {
+		composeFileName = string(f)
+		defer f.Destroy()
+	}
+
+	var envFileName string
 	if deployment.EnvFile != nil {
-		if envFile, err = os.CreateTemp("", "distr-env"); err != nil {
-			logger.Error("", zap.Error(err))
-			return "", fmt.Errorf("failed to create env file in tmp directory: %w", err)
+		if f, err := WriteTempFile("distr-*.env", deployment.EnvFile); err != nil {
+			return fmt.Errorf("failed to write env file: %w", err)
 		} else {
-			if _, err = envFile.Write(deployment.EnvFile); err != nil {
-				logger.Error("", zap.Error(err))
-				return "", fmt.Errorf("failed to write env file: %w", err)
-			}
-			_ = envFile.Close()
-			defer func() {
-				if err := os.Remove(envFile.Name()); err != nil {
-					logger.Error("failed to remove env file from tmp directory", zap.Error(err))
-				}
-			}()
+			envFileName = string(f)
+			defer f.Destroy()
 		}
 	}
 
-	composeArgs := []string{"compose"}
-	if envFile != nil {
-		composeArgs = append(composeArgs, fmt.Sprintf("--env-file=%v", envFile.Name()))
-	}
-	composeArgs = append(composeArgs, "-f", "-", "up", "-d", "--quiet-pull", "--remove-orphans")
-
-	cmd := exec.CommandContext(ctx, "docker", composeArgs...)
-	cmd.Stdin = bytes.NewReader(deployment.ComposeFile)
-	cmd.Env = append(os.Environ(), DockerConfigEnv(deployment)...)
-
-	var cmdOut []byte
-	cmdOut, err = cmd.CombinedOutput()
-	statusStr := string(cmdOut)
-	logger.Debug("docker compose returned", zap.String("output", statusStr), zap.Error(err))
-
+	eventProcessor := NewEventProcessor(updateStatus)
+	composeService, err := ComposeServiceForDeployment(deployment, compose.WithEventProcessor(eventProcessor))
 	if err != nil {
-		return "", errors.New(statusStr)
-	} else {
-		return statusStr, nil
+		return fmt.Errorf("failed to initialize compose service: %w", err)
 	}
+
+	loadOpts := composeapi.ProjectLoadOptions{ConfigPaths: []string{composeFileName}}
+	if envFileName != "" {
+		loadOpts.EnvFiles = []string{envFileName}
+	}
+
+	project, err := composeService.LoadProject(ctx, loadOpts)
+	if err != nil {
+		return fmt.Errorf("failed to load compose project: %w", err)
+	}
+
+	err = composeService.Up(ctx, project, composeapi.UpOptions{
+		Create: composeapi.CreateOptions{RemoveOrphans: true},
+		Start:  composeapi.StartOptions{Project: project},
+	})
+	if err != nil {
+		return fmt.Errorf("compose up failed: %w", err)
+	}
+
+	return nil
 }
 
-func ApplyComposeFileSwarm(ctx context.Context, deployment api.AgentDeployment) (string, error) {
+func ApplyComposeFileSwarm(
+	ctx context.Context,
+	deployment api.AgentDeployment,
+	updateStatus func(string),
+) (string, error) {
 	// Step 1 Ensure Docker Swarm is initialized
 	initCmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.Swarm.LocalNodeState}}")
 	initOutput, err := initCmd.CombinedOutput()
@@ -134,6 +148,8 @@ func ApplyComposeFileSwarm(ctx context.Context, deployment api.AgentDeployment) 
 			envVars = append(envVars, fmt.Sprintf("%s=%s", key, value))
 		}
 	}
+
+	updateStatus("applying compose project")
 
 	// Deploy the stack
 	composeArgs := []string{

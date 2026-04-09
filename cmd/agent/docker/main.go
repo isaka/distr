@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os/signal"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -180,8 +181,8 @@ loop:
 
 							progressCtx, progressCancel := context.WithCancel(ctx)
 							defer progressCancel()
-							go sendProgressInterval(progressCtx, deployment.RevisionID)
-							agentDeployment, status, err = DockerEngineApply(ctx, deployment)
+							updateStatus := sendProgressInterval(progressCtx, deployment.RevisionID)
+							agentDeployment, status, err = DockerEngineApply(ctx, deployment, updateStatus)
 							if err == nil {
 								if deployment.ImageCleanupEnabled {
 									if delErr := DeleteImages(ctx, previousDeploymentImages); delErr != nil {
@@ -218,26 +219,33 @@ loop:
 	}
 }
 
-func sendProgressInterval(ctx context.Context, revisionID uuid.UUID) {
-	tick := time.Tick(agentenv.Interval)
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Debug("stop sending progress updates")
-			return
-		case <-tick:
-			logger.Info("sending progress update")
-			err := client.Status(
-				ctx,
-				revisionID,
-				types.DeploymentStatusTypeProgressing,
-				"applying docker compose…",
-			)
-			if err != nil {
-				logger.Warn("error updating status", zap.Error(err))
+func sendProgressInterval(ctx context.Context, revisionID uuid.UUID) func(string) {
+	var status atomic.Value
+	status.Store("initializing")
+
+	go func() {
+		tick := time.Tick(agentenv.Interval)
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Debug("stop sending progress updates")
+				return
+			case <-tick:
+				logger.Info("sending progress update")
+				err := client.Status(
+					ctx,
+					revisionID,
+					types.DeploymentStatusTypeProgressing,
+					status.Load().(string),
+				)
+				if err != nil {
+					logger.Warn("error updating status", zap.Error(err))
+				}
 			}
 		}
-	}
+	}()
+
+	return func(s string) { status.Store(s) }
 }
 
 func startHealthServer() error {
