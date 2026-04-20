@@ -12,7 +12,7 @@ func (r *Registry) GetJobsScheduler() *jobs.Scheduler {
 }
 
 func (r *Registry) createJobsScheduler() (*jobs.Scheduler, error) {
-	scheduler, err := jobs.NewScheduler(r.GetLogger(), r.GetDbPool(), r.GetMailer(), r.GetTracers().Always())
+	scheduler, err := jobs.NewScheduler(r.GetLogger(), r.GetDbPool(), r.GetMailer(), r.GetTracers().Always(), r.s3Client)
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +77,16 @@ func (r *Registry) createJobsScheduler() (*jobs.Scheduler, error) {
 		err = scheduler.RegisterCronJob(
 			*cron,
 			jobs.NewJob("OIDCStateCleanup", cleanup.RunOIDCStateCleanup, env.CleanupOIDCStateCronTimeout()),
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if cron := env.CleanupArtifactBlobCron(); cron != nil && r.s3Client != nil {
+		err = scheduler.RegisterCronJob(
+			*cron,
+			jobs.NewJob("ArtifactBlobCleanup", cleanup.RunArtifactBlobCleanup, env.CleanupArtifactBlobTimeout()),
 		)
 		if err != nil {
 			return nil, err
